@@ -1,0 +1,23 @@
+[package]
+name    = "yolo26-pose"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# ORT 2.x is presently published as release candidates on crates.io.
+ort = { version = "2.0.0-rc.12", features = ["cuda", "tensorrt"] }
+
+# Image loading / resizing (no OpenCV dependency)
+image  = "0.25"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Fast float slice ops
+bytemuck = "1"
+
+anyhow = "1"
+
+# GPU compositing for pose overlays. The same renderer is used for images and video frames.
+wgpu = "24"
+pollster = "0.4"
