@@ -2,6 +2,7 @@ use std::{
     io::{BufReader, Read, Write},
     path::Path,
     process::{Command, Stdio},
+    time::{Duration, Instant},
 };
 
 use anyhow::{bail, Context, Result};
@@ -78,6 +79,9 @@ pub fn annotate_mp4(
         .context("ffmpeg encoder has no stdin")?;
     let mut frame = vec![0; frame_bytes];
     let mut frame_number = 0usize;
+    let started = Instant::now();
+    let mut inference_time = Duration::ZERO;
+    let mut render_time = Duration::ZERO;
     loop {
         let mut read = 0;
         while read < frame.len() {
@@ -98,14 +102,25 @@ pub fn annotate_mp4(
 
         let image = RgbaImage::from_raw(info.width, info.height, frame.clone())
             .context("decoded frame dimensions do not match its buffer")?;
+        let inference_started = Instant::now();
         let detections = inferencer.infer(&DynamicImage::ImageRgba8(image))?;
+        inference_time += inference_started.elapsed();
+        let render_started = Instant::now();
         let annotated = renderer.render(&frame, info.width, info.height, &detections, kpt_conf)?;
+        render_time += render_started.elapsed();
         writer
             .write_all(&annotated)
             .context("writing annotated frame to NVENC")?;
         frame_number += 1;
         if frame_number % 30 == 0 {
-            eprintln!("Processed {frame_number} video frames");
+            let elapsed = started.elapsed().as_secs_f64();
+            let frames = frame_number as f64;
+            eprintln!(
+                "Processed {frame_number} video frames in {elapsed:.1}s ({:.2} fps): infer {:.1} ms/frame, render {:.1} ms/frame",
+                frames / elapsed,
+                inference_time.as_secs_f64() * 1_000.0 / frames,
+                render_time.as_secs_f64() * 1_000.0 / frames,
+            );
         }
     }
     drop(writer);
@@ -115,9 +130,14 @@ pub fn annotate_mp4(
     if !encoder.wait()?.success() {
         bail!("ffmpeg NVENC encoder failed");
     }
+    let elapsed = started.elapsed().as_secs_f64();
+    let frames = frame_number as f64;
     println!(
-        "Wrote {frame_number} annotated frames to {}",
-        output.display()
+        "Wrote {frame_number} annotated frames to {} in {elapsed:.1}s ({:.2} fps; infer {:.1} ms/frame, render {:.1} ms/frame)",
+        output.display(),
+        frames / elapsed,
+        inference_time.as_secs_f64() * 1_000.0 / frames,
+        render_time.as_secs_f64() * 1_000.0 / frames,
     );
     Ok(())
 }
