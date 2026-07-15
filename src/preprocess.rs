@@ -6,13 +6,6 @@
 //!   center-pad the remainder with pixel value 114
 //!   convert RGB → CHW f32 / 255.0
 
-//! Letterbox resize + CHW f32 normalization — mirrors ultralytics LetterBox.
-//!
-//! Algorithm (from ultralytics/data/augment.py LetterBox):
-//!   scale = min(target_h / src_h, target_w / src_w)
-//!   new_w = round(src_w * scale),  new_h = round(src_h * scale)
-//!   center-pad the remainder with pixel value 114
-//!   convert RGB → CHW f32 / 255.0
 
 use fast_image_resize as fr;
 use image::{DynamicImage, GenericImageView};

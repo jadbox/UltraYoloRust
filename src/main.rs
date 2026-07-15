@@ -5,6 +5,7 @@ mod render;
 mod tensorrt;
 mod types;
 mod video;
+mod video_threads;
 
 use anyhow::{bail, Context, Result};
 use clap::Parser;

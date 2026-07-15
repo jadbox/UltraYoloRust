@@ -1,5 +1,4 @@
 use std::{
-    io::{BufReader, Read, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     time::{Duration, Instant},
@@ -8,13 +7,13 @@ use std::{
 use crate::{
     inference::PoseInferencer,
     render::PoseRenderer,
-    types::{coco17_to_halpe26, select_best_person, OpenSimDoc, OpenSimPerson},
+    types::{OpenSimDoc, PoseDetection},
 };
 use anyhow::{bail, Context, Result};
 
-struct SavePayload {
-    path: PathBuf,
-    doc: OpenSimDoc,
+pub struct SavePayload {
+    pub path: PathBuf,
+    pub doc: OpenSimDoc,
 }
 
 struct VideoInfo {
@@ -81,13 +80,8 @@ pub fn annotate_mp4(
         None
     };
 
-    let mut reader = BufReader::new(
-        decoder
-            .stdout
-            .take()
-            .context("ffmpeg decoder has no stdout")?,
-    );
-    let mut writer = encoder
+    let decoder_stdout = decoder.stdout.take().context("ffmpeg decoder has no stdout")?;
+    let writer = encoder
         .as_mut()
         .and_then(|enc| enc.stdin.take());
 
@@ -95,120 +89,77 @@ pub fn annotate_mp4(
     if let Some(ref dir) = opensim {
         std::fs::create_dir_all(dir)?;
     }
-    let (tx, rx) = std::sync::mpsc::channel::<SavePayload>();
-    let writer_thread = std::thread::spawn(move || {
-        while let Ok(payload) = rx.recv() {
-            if let Err(e) = std::fs::File::create(&payload.path)
-                .context("creating opensim json file")
-                .and_then(|file| serde_json::to_writer(file, &payload.doc).context("writing opensim json"))
-            {
-                eprintln!("Error saving OpenSim JSON to {}: {:?}", payload.path.display(), e);
-            }
-        }
-    });
 
-    let mut frame = vec![0; frame_bytes];
-    let mut frame_number = 0usize;
+    let (tx_json, rx_json) = std::sync::mpsc::channel::<SavePayload>();
+    let (tx_dec, rx_dec) = std::sync::mpsc::sync_channel::<(Vec<u8>, usize)>(4);
+    let (tx_inf, rx_inf) = std::sync::mpsc::sync_channel::<(Vec<u8>, Vec<PoseDetection>, usize)>(4);
+
     let started = Instant::now();
     let mut read_time = Duration::ZERO;
-    let mut inference_time = Duration::ZERO;
     let mut render_time = Duration::ZERO;
     let mut write_time = Duration::ZERO;
-    let mut annotated = Vec::with_capacity(frame_bytes);
-    loop {
-        let read_started = Instant::now();
-        let mut read = 0;
-        while read < frame.len() {
-            let count = reader
-                .read(&mut frame[read..])
-                .context("reading decoded frame")?;
-            if count == 0 {
-                if read == 0 {
-                    break;
-                }
-                bail!("ffmpeg decoder ended in the middle of frame {frame_number}");
-            }
-            read += count;
-        }
-        if read == 0 {
-            break;
-        }
-        read_time += read_started.elapsed();
+    let mut frame_number = 0usize;
 
-        let inference_started = Instant::now();
-        let detections = inferencer.infer_rgba(&mut frame, info.width, info.height)?;
-        inference_time += inference_started.elapsed();
+    std::thread::scope(|s| {
+        // 1. JSON Writer Thread
+        s.spawn(move || {
+            crate::video_threads::run_json_writer(rx_json);
+        });
 
-        if let Some(ref dir) = opensim {
-            let filename = format!("{}_{:06}.json", stem, frame_number);
-            let path = dir.join(filename);
-            let best = select_best_person(&detections).cloned();
-            let people = if let Some(det) = best {
-                vec![OpenSimPerson {
-                    person_id: vec![-1],
-                    pose_keypoints_2d: coco17_to_halpe26(&det.keypoints),
-                    face_keypoints_2d: vec![],
-                    hand_left_keypoints_2d: vec![],
-                    hand_right_keypoints_2d: vec![],
-                    pose_keypoints_3d: vec![],
-                    face_keypoints_3d: vec![],
-                    hand_left_keypoints_3d: vec![],
-                    hand_right_keypoints_3d: vec![],
-                }]
-            } else {
-                vec![]
-            };
-            let doc = OpenSimDoc {
-                version: 1.3,
-                people,
-            };
-            let _ = tx.send(SavePayload { path, doc });
-        }
+        // 2. Decoder Thread
+        let t_dec = s.spawn(move || -> Result<Duration> {
+            crate::video_threads::run_decoder(decoder_stdout, frame_bytes, tx_dec)
+        });
 
-        if let Some(ref mut w) = writer {
-            let render_started = Instant::now();
-            renderer.render_into(
-                &frame,
+        // 3. Render/Encoder Thread
+        let opensim_owned = opensim.map(|p| p.to_path_buf());
+        let t_render = s.spawn(move || -> Result<(Duration, Duration)> {
+            crate::video_threads::run_renderer(
+                rx_inf,
+                opensim_owned,
+                stem,
+                tx_json,
+                writer,
+                renderer,
+                kpt_conf,
+                frame_bytes,
                 info.width,
                 info.height,
-                &detections,
-                kpt_conf,
-                &mut annotated,
-            )?;
-            render_time += render_started.elapsed();
-            
-            let write_started = Instant::now();
-            w.write_all(&annotated)
-                .context("writing annotated frame to NVENC")?;
-            write_time += write_started.elapsed();
-        }
-        
-        frame_number += 1;
-        if frame_number % 30 == 0 {
-            let elapsed = started.elapsed().as_secs_f64();
-            let frames = frame_number as f64;
-            if writer.is_some() {
+            )
+        });
+
+        // 4. Main Thread (Runs Inference)
+        let width = info.width;
+        let height = info.height;
+
+        while let Ok((mut frame, f_num)) = rx_dec.recv() {
+            frame_number = f_num + 1;
+            let detections = inferencer.infer_rgba(&mut frame, width, height)?;
+            if tx_inf.send((frame, detections, f_num)).is_err() {
+                break;
+            }
+
+            if frame_number % 30 == 0 {
+                let elapsed = started.elapsed().as_secs_f64();
+                let frames = frame_number as f64;
                 eprintln!(
-                    "Processed {frame_number} video frames in {elapsed:.1}s ({:.2} fps): read {:.1} ms/frame, infer {:.1} ms/frame, render {:.1} ms/frame, write {:.1} ms/frame",
-                    frames / elapsed,
-                    read_time.as_secs_f64() * 1_000.0 / frames,
-                    inference_time.as_secs_f64() * 1_000.0 / frames,
-                    render_time.as_secs_f64() * 1_000.0 / frames,
-                    write_time.as_secs_f64() * 1_000.0 / frames,
-                );
-            } else {
-                eprintln!(
-                    "Processed {frame_number} video frames in {elapsed:.1}s ({:.2} fps): read {:.1} ms/frame, infer {:.1} ms/frame",
-                    frames / elapsed,
-                    read_time.as_secs_f64() * 1_000.0 / frames,
-                    inference_time.as_secs_f64() * 1_000.0 / frames,
+                    "Processed {frame_number} video frames in {elapsed:.1}s ({:.2} fps)",
+                    frames / elapsed
                 );
             }
         }
-    }
-    drop(writer);
-    drop(tx);
-    let _ = writer_thread.join();
+
+        // Drop tx_inf to close rx_inf and signal render thread to exit
+        drop(tx_inf);
+
+        // Collect decoder and render thread results
+        read_time = t_dec.join().unwrap()?;
+        let (r_time, w_time) = t_render.join().unwrap()?;
+        render_time = r_time;
+        write_time = w_time;
+        Ok::<(), anyhow::Error>(())
+    })?;
+
     if !decoder.wait()?.success() {
         bail!("ffmpeg video decoder failed");
     }
@@ -217,34 +168,42 @@ pub fn annotate_mp4(
             bail!("ffmpeg NVENC encoder failed");
         }
     }
+
     let elapsed = started.elapsed().as_secs_f64();
     let frames = frame_number as f64;
+
     if output.is_some() {
         println!(
-            "Wrote {frame_number} annotated frames to {} in {elapsed:.1}s ({:.2} fps; infer {:.1} ms/frame, render {:.1} ms/frame)",
+            "Wrote {frame_number} annotated frames to {} in {elapsed:.1}s ({:.2} fps)",
             output.unwrap().display(),
-            frames / elapsed,
-            inference_time.as_secs_f64() * 1_000.0 / frames,
-            render_time.as_secs_f64() * 1_000.0 / frames,
+            frames / elapsed
         );
     } else {
         println!(
-            "Processed {frame_number} video frames in {elapsed:.1}s ({:.2} fps; infer {:.1} ms/frame)",
-            frames / elapsed,
-            inference_time.as_secs_f64() * 1_000.0 / frames,
+            "Processed {frame_number} video frames in {elapsed:.1}s ({:.2} fps)",
+            frames / elapsed
         );
     }
+
     println!(
-        "Rust Inference Breakdown:\n\
+        "Rust Inference Pipeline Timings (Thread-Local Average):\n\
+         - Decode: {:.2} ms/frame\n\
          - Preprocess (CPU Resize + Normalization): {:.2} ms/frame\n\
          - TensorRT Engine Inference: {:.2} ms/frame\n\
-         - Postprocess (Decode Pose): {:.2} ms/frame",
+         - Postprocess (Decode Pose): {:.2} ms/frame\n\
+         - Render Overlay: {:.2} ms/frame\n\
+         - NVENC Write: {:.2} ms/frame",
+        read_time.as_secs_f64() * 1_000.0 / frames,
         inferencer.preprocess_accum.as_secs_f64() * 1_000.0 / frames,
         inferencer.engine_accum.as_secs_f64() * 1_000.0 / frames,
-        inferencer.postprocess_accum.as_secs_f64() * 1_000.0 / frames
+        inferencer.postprocess_accum.as_secs_f64() * 1_000.0 / frames,
+        render_time.as_secs_f64() * 1_000.0 / frames,
+        write_time.as_secs_f64() * 1_000.0 / frames
     );
+
     Ok(())
 }
+
 
 fn probe(source: &Path) -> Result<VideoInfo> {
     let output = Command::new("ffprobe")

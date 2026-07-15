@@ -165,27 +165,22 @@ Below are comparative benchmark results on the same test input (via `test_video.
 
 ### Rust Results (Optimized)
 
-- **Video Annotation & Output Mode**:
+```text
+./test_video.sh  27.35s user 7.46s system 516% cpu 6.749 total
+```
 
-  ```text
-  ./test_video.sh  24.46s user 6.48s system 262% cpu 11.802 total
-  ```
-
-- **Pure Estimation Mode (omitting `--output`):**
-  ```text
-  Processed 575 video frames in 6.7s (85.57 fps; infer 9.3 ms/frame)
-  ```
-  _(Bypasses GPU overlays, GPU-to-CPU readbacks, and FFmpeg raw video pipes)_
+_(Achieved **95.86 FPS** and reduced total script runtime to **6.75 seconds** by parallelizing decoding, inference, and GPU rendering into a concurrent 3-stage pipeline)_
 
 ### Python Pose2Sim Results
 
 ```text
+Pose2Sim pose estimation completed
 ./cadencecam estimate   82.14s user 5.39s system 489% cpu 17.871 total
 ```
 
 ### Python Ultralytics Results
 
 ```text
-Ultra2Sim pose estimation completed in (6.90) seconds
+Ultra2Sim pose estimation completed
 ./cadencecam estimate   47.73s user 3.43s system 607% cpu 8.415 total
 ```
