@@ -6,7 +6,16 @@
 //!   center-pad the remainder with pixel value 114
 //!   convert RGB → CHW f32 / 255.0
 
-use image::{imageops::FilterType, DynamicImage, GenericImageView, RgbImage};
+//! Letterbox resize + CHW f32 normalization — mirrors ultralytics LetterBox.
+//!
+//! Algorithm (from ultralytics/data/augment.py LetterBox):
+//!   scale = min(target_h / src_h, target_w / src_w)
+//!   new_w = round(src_w * scale),  new_h = round(src_h * scale)
+//!   center-pad the remainder with pixel value 114
+//!   convert RGB → CHW f32 / 255.0
+
+use fast_image_resize as fr;
+use image::{DynamicImage, GenericImageView};
 
 /// Output of the preprocessor, needed to unscale coordinates afterwards.
 pub struct LetterboxInfo {
@@ -34,42 +43,53 @@ pub fn letterbox_to_tensor(img: &DynamicImage, model_size: u32) -> (Vec<f32>, Le
     let new_w = (src_w as f32 * scale).round() as u32;
     let new_h = (src_h as f32 * scale).round() as u32;
 
-    // 2. Resize to (new_w, new_h) using bilinear interpolation.
-    let resized = img
-        .resize_exact(new_w, new_h, FilterType::Triangle)
-        .to_rgb8();
+    // 2. Resize using fast_image_resize
+    let mut raw_rgba = img.to_rgba8();
+    let src_image = fr::images::Image::from_slice_u8(
+        src_w,
+        src_h,
+        raw_rgba.as_mut(),
+        fr::PixelType::U8x4,
+    ).unwrap();
 
-    // 3. Create a (model_size × model_size) canvas filled with 114 (grey).
-    let mut canvas = RgbImage::from_pixel(model_size, model_size, image::Rgb([114u8, 114, 114]));
+    let mut dst_image = fr::images::Image::new(
+        new_w,
+        new_h,
+        fr::PixelType::U8x4,
+    );
+
+    let mut resizer = fr::Resizer::new();
+    resizer.resize(&src_image, &mut dst_image, None).unwrap();
+    let resized_raw = dst_image.buffer();
 
     // Match Ultralytics LetterBox(center=True), including its rounding bias.
     let pad_left = (((model_size - new_w) as f32 / 2.0) - 0.1).round() as u32;
     let pad_top = (((model_size - new_h) as f32 / 2.0) - 0.1).round() as u32;
 
-    // 4. Copy resized image into the centered letterbox region.
-    for y in 0..new_h {
-        for x in 0..new_w {
-            canvas.put_pixel(x + pad_left, y + pad_top, *resized.get_pixel(x, y));
-        }
-    }
-
-    // 5. HWC u8 → CHW f32 / 255  (RGB already, ORT model expects RGB CHW)
     let area = (model_size * model_size) as usize;
-    let mut blob = vec![0f32; 3 * area];
-    for y in 0..model_size as usize {
-        for x in 0..model_size as usize {
-            let px = canvas.get_pixel(x as u32, y as u32);
-            let idx = y * model_size as usize + x;
-            blob[0 * area + idx] = px[0] as f32 / 255.0; // R
-            blob[1 * area + idx] = px[1] as f32 / 255.0; // G
-            blob[2 * area + idx] = px[2] as f32 / 255.0; // B
+    let mut blob = vec![114.0 / 255.0; 3 * area];
+
+    let inv_255 = 1.0 / 255.0;
+    let pad_left = pad_left as usize;
+    let pad_top = pad_top as usize;
+    let model_size = model_size as usize;
+
+    for y in 0..new_h as usize {
+        let row_offset = (y + pad_top) * model_size + pad_left;
+        let raw_row_offset = y * (new_w as usize) * 4;
+        for x in 0..new_w as usize {
+            let px_idx = raw_row_offset + x * 4;
+            let blob_idx = row_offset + x;
+            blob[blob_idx] = resized_raw[px_idx] as f32 * inv_255;
+            blob[area + blob_idx] = resized_raw[px_idx + 1] as f32 * inv_255;
+            blob[2 * area + blob_idx] = resized_raw[px_idx + 2] as f32 * inv_255;
         }
     }
 
     let info = LetterboxInfo {
         scale,
-        pad_left,
-        pad_top,
+        pad_left: pad_left as u32,
+        pad_top: pad_top as u32,
         orig_w: src_w,
         orig_h: src_h,
     };
@@ -79,39 +99,63 @@ pub fn letterbox_to_tensor(img: &DynamicImage, model_size: u32) -> (Vec<f32>, Le
 
 /// Convert a borrowed RGBA frame without cloning its full-resolution buffer.
 pub fn letterbox_rgba_to_tensor(
-    rgba: &[u8],
+    rgba: &mut [u8],
     src_w: u32,
     src_h: u32,
     model_size: u32,
 ) -> (Vec<f32>, LetterboxInfo) {
-    let frame = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(src_w, src_h, rgba)
-        .expect("caller must provide exactly width * height * 4 RGBA bytes");
     let scale = f32::min(
         model_size as f32 / src_w as f32,
         model_size as f32 / src_h as f32,
     );
     let new_w = (src_w as f32 * scale).round() as u32;
     let new_h = (src_h as f32 * scale).round() as u32;
-    let resized = image::imageops::resize(&frame, new_w, new_h, FilterType::Triangle);
+
+    let src_image = fr::images::Image::from_slice_u8(
+        src_w,
+        src_h,
+        rgba,
+        fr::PixelType::U8x4,
+    ).unwrap();
+
+    let mut dst_image = fr::images::Image::new(
+        new_w,
+        new_h,
+        fr::PixelType::U8x4,
+    );
+
+    let mut resizer = fr::Resizer::new();
+    resizer.resize(&src_image, &mut dst_image, None).unwrap();
+    let resized_raw = dst_image.buffer();
+
     let pad_left = (((model_size - new_w) as f32 / 2.0) - 0.1).round() as u32;
     let pad_top = (((model_size - new_h) as f32 / 2.0) - 0.1).round() as u32;
     let area = (model_size * model_size) as usize;
     let mut blob = vec![114.0 / 255.0; 3 * area];
+
+    let inv_255 = 1.0 / 255.0;
+    let pad_left = pad_left as usize;
+    let pad_top = pad_top as usize;
+    let model_size = model_size as usize;
+
     for y in 0..new_h as usize {
+        let row_offset = (y + pad_top) * model_size + pad_left;
+        let raw_row_offset = y * (new_w as usize) * 4;
         for x in 0..new_w as usize {
-            let pixel = resized.get_pixel(x as u32, y as u32);
-            let index = (y + pad_top as usize) * model_size as usize + x + pad_left as usize;
-            blob[index] = pixel[0] as f32 / 255.0;
-            blob[area + index] = pixel[1] as f32 / 255.0;
-            blob[2 * area + index] = pixel[2] as f32 / 255.0;
+            let px_idx = raw_row_offset + x * 4;
+            let blob_idx = row_offset + x;
+            blob[blob_idx] = resized_raw[px_idx] as f32 * inv_255;
+            blob[area + blob_idx] = resized_raw[px_idx + 1] as f32 * inv_255;
+            blob[2 * area + blob_idx] = resized_raw[px_idx + 2] as f32 * inv_255;
         }
     }
+
     (
         blob,
         LetterboxInfo {
             scale,
-            pad_left,
-            pad_top,
+            pad_left: pad_left as u32,
+            pad_top: pad_top as u32,
             orig_w: src_w,
             orig_h: src_h,
         },

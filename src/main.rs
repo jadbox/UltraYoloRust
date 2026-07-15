@@ -27,7 +27,7 @@ struct Cli {
     source: PathBuf,
     /// Annotated JPEG, PNG, or MP4 destination.
     #[arg(long)]
-    output: PathBuf,
+    output: Option<PathBuf>,
     #[arg(long, default_value_t = 0)]
     device: i32,
     #[arg(long, default_value_t = false)]
@@ -61,12 +61,14 @@ fn main() -> Result<()> {
     let mut renderer = PoseRenderer::new()?;
     match extension(&args.source).as_deref() {
         Some("mp4") => {
-            if extension(&args.output).as_deref() != Some("mp4") {
-                bail!("an MP4 source requires an .mp4 output");
+            if let Some(ref out) = args.output {
+                if extension(out).as_deref() != Some("mp4") {
+                    bail!("an MP4 source requires an .mp4 output");
+                }
             }
             video::annotate_mp4(
                 &args.source,
-                &args.output,
+                args.output.as_deref(),
                 &mut inferencer,
                 &mut renderer,
                 args.kpt_conf,
@@ -88,9 +90,11 @@ fn annotate_image(
     inferencer: &mut PoseInferencer,
     renderer: &mut PoseRenderer,
 ) -> Result<()> {
-    match extension(&args.output).as_deref() {
-        Some("jpg") | Some("jpeg") | Some("png") => {}
-        _ => bail!("an image source requires a .jpg, .jpeg, or .png output"),
+    if let Some(ref out) = args.output {
+        match extension(out).as_deref() {
+            Some("jpg") | Some("jpeg") | Some("png") => {}
+            _ => bail!("an image source requires a .jpg, .jpeg, or .png output"),
+        }
     }
     let image = open_image(&args.source)?;
     println!("Image: {}x{}", image.width(), image.height());
@@ -130,24 +134,26 @@ fn annotate_image(
         handle.join().unwrap()?;
     }
 
-    let rgba = image.to_rgba8();
-    let annotated = renderer.render(
-        rgba.as_raw(),
-        image.width(),
-        image.height(),
-        &detections,
-        args.kpt_conf,
-    )?;
-    let rendered = RgbaImage::from_raw(image.width(), image.height(), annotated)
-        .context("GPU renderer returned an invalid RGBA frame")?;
-    match extension(&args.output).as_deref() {
-        Some("jpg") | Some("jpeg") => DynamicImage::ImageRgba8(rendered)
-            .to_rgb8()
-            .save(&args.output)?,
-        Some("png") => rendered.save(&args.output)?,
-        _ => unreachable!("validated before rendering"),
+    if let Some(ref out) = args.output {
+        let rgba = image.to_rgba8();
+        let annotated = renderer.render(
+            rgba.as_raw(),
+            image.width(),
+            image.height(),
+            &detections,
+            args.kpt_conf,
+        )?;
+        let rendered = RgbaImage::from_raw(image.width(), image.height(), annotated)
+            .context("GPU renderer returned an invalid RGBA frame")?;
+        match extension(out).as_deref() {
+            Some("jpg") | Some("jpeg") => DynamicImage::ImageRgba8(rendered)
+                .to_rgb8()
+                .save(out)?,
+            Some("png") => rendered.save(out)?,
+            _ => unreachable!("validated before rendering"),
+        }
+        println!("Wrote annotated image to {}", out.display());
     }
-    println!("Wrote annotated image to {}", args.output.display());
     Ok(())
 }
 

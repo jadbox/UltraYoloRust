@@ -3,4 +3,5 @@ target/
 annotated.*
 *.mp4
 pose/
-
+test_python*.sh
+test_python.sh

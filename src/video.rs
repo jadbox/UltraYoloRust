@@ -25,7 +25,7 @@ struct VideoInfo {
 
 pub fn annotate_mp4(
     source: &Path,
-    output: &Path,
+    output: Option<&Path>,
     inferencer: &mut PoseInferencer,
     renderer: &mut PoseRenderer,
     kpt_conf: f32,
@@ -43,37 +43,43 @@ pub fn annotate_mp4(
         .stderr(Stdio::inherit())
         .spawn()
         .context("starting ffmpeg video decoder")?;
-    let mut encoder = Command::new("ffmpeg")
-        .args([
-            "-y", "-v", "error", "-f", "rawvideo", "-pix_fmt", "rgba", "-s",
-        ])
-        .arg(format!("{}x{}", info.width, info.height))
-        .args(["-r"])
-        .arg(&info.fps)
-        .args(["-i", "pipe:0", "-i"])
-        .arg(source)
-        .args([
-            "-map",
-            "0:v:0",
-            "-map",
-            "1:a?",
-            "-c:v",
-            "h264_nvenc",
-            "-preset",
-            "p4",
-            "-cq",
-            "20",
-            "-pix_fmt",
-            "yuv420p",
-            "-c:a",
-            "copy",
-            "-shortest",
-        ])
-        .arg(output)
-        .stdin(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .context("starting ffmpeg NVENC video encoder")?;
+
+    let mut encoder = if let Some(out) = output {
+        let e = Command::new("ffmpeg")
+            .args([
+                "-y", "-v", "error", "-f", "rawvideo", "-pix_fmt", "rgba", "-s",
+            ])
+            .arg(format!("{}x{}", info.width, info.height))
+            .args(["-r"])
+            .arg(&info.fps)
+            .args(["-i", "pipe:0", "-i"])
+            .arg(source)
+            .args([
+                "-map",
+                "0:v:0",
+                "-map",
+                "1:a?",
+                "-c:v",
+                "h264_nvenc",
+                "-preset",
+                "p4",
+                "-cq",
+                "20",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "copy",
+                "-shortest",
+            ])
+            .arg(out)
+            .stdin(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .context("starting ffmpeg NVENC video encoder")?;
+        Some(e)
+    } else {
+        None
+    };
 
     let mut reader = BufReader::new(
         decoder
@@ -82,9 +88,9 @@ pub fn annotate_mp4(
             .context("ffmpeg decoder has no stdout")?,
     );
     let mut writer = encoder
-        .stdin
-        .take()
-        .context("ffmpeg encoder has no stdin")?;
+        .as_mut()
+        .and_then(|enc| enc.stdin.take());
+
     let stem = source.file_stem().and_then(|s| s.to_str()).unwrap_or("video").to_string();
     if let Some(ref dir) = opensim {
         std::fs::create_dir_all(dir)?;
@@ -104,10 +110,13 @@ pub fn annotate_mp4(
     let mut frame = vec![0; frame_bytes];
     let mut frame_number = 0usize;
     let started = Instant::now();
+    let mut read_time = Duration::ZERO;
     let mut inference_time = Duration::ZERO;
     let mut render_time = Duration::ZERO;
+    let mut write_time = Duration::ZERO;
     let mut annotated = Vec::with_capacity(frame_bytes);
     loop {
+        let read_started = Instant::now();
         let mut read = 0;
         while read < frame.len() {
             let count = reader
@@ -124,9 +133,10 @@ pub fn annotate_mp4(
         if read == 0 {
             break;
         }
+        read_time += read_started.elapsed();
 
         let inference_started = Instant::now();
-        let detections = inferencer.infer_rgba(&frame, info.width, info.height)?;
+        let detections = inferencer.infer_rgba(&mut frame, info.width, info.height)?;
         inference_time += inference_started.elapsed();
 
         if let Some(ref dir) = opensim {
@@ -155,29 +165,45 @@ pub fn annotate_mp4(
             let _ = tx.send(SavePayload { path, doc });
         }
 
-        let render_started = Instant::now();
-        renderer.render_into(
-            &frame,
-            info.width,
-            info.height,
-            &detections,
-            kpt_conf,
-            &mut annotated,
-        )?;
-        render_time += render_started.elapsed();
-        writer
-            .write_all(&annotated)
-            .context("writing annotated frame to NVENC")?;
+        if let Some(ref mut w) = writer {
+            let render_started = Instant::now();
+            renderer.render_into(
+                &frame,
+                info.width,
+                info.height,
+                &detections,
+                kpt_conf,
+                &mut annotated,
+            )?;
+            render_time += render_started.elapsed();
+            
+            let write_started = Instant::now();
+            w.write_all(&annotated)
+                .context("writing annotated frame to NVENC")?;
+            write_time += write_started.elapsed();
+        }
+        
         frame_number += 1;
         if frame_number % 30 == 0 {
             let elapsed = started.elapsed().as_secs_f64();
             let frames = frame_number as f64;
-            eprintln!(
-                "Processed {frame_number} video frames in {elapsed:.1}s ({:.2} fps): infer {:.1} ms/frame, render {:.1} ms/frame",
-                frames / elapsed,
-                inference_time.as_secs_f64() * 1_000.0 / frames,
-                render_time.as_secs_f64() * 1_000.0 / frames,
-            );
+            if writer.is_some() {
+                eprintln!(
+                    "Processed {frame_number} video frames in {elapsed:.1}s ({:.2} fps): read {:.1} ms/frame, infer {:.1} ms/frame, render {:.1} ms/frame, write {:.1} ms/frame",
+                    frames / elapsed,
+                    read_time.as_secs_f64() * 1_000.0 / frames,
+                    inference_time.as_secs_f64() * 1_000.0 / frames,
+                    render_time.as_secs_f64() * 1_000.0 / frames,
+                    write_time.as_secs_f64() * 1_000.0 / frames,
+                );
+            } else {
+                eprintln!(
+                    "Processed {frame_number} video frames in {elapsed:.1}s ({:.2} fps): read {:.1} ms/frame, infer {:.1} ms/frame",
+                    frames / elapsed,
+                    read_time.as_secs_f64() * 1_000.0 / frames,
+                    inference_time.as_secs_f64() * 1_000.0 / frames,
+                );
+            }
         }
     }
     drop(writer);
@@ -186,17 +212,36 @@ pub fn annotate_mp4(
     if !decoder.wait()?.success() {
         bail!("ffmpeg video decoder failed");
     }
-    if !encoder.wait()?.success() {
-        bail!("ffmpeg NVENC encoder failed");
+    if let Some(mut enc) = encoder {
+        if !enc.wait()?.success() {
+            bail!("ffmpeg NVENC encoder failed");
+        }
     }
     let elapsed = started.elapsed().as_secs_f64();
     let frames = frame_number as f64;
+    if output.is_some() {
+        println!(
+            "Wrote {frame_number} annotated frames to {} in {elapsed:.1}s ({:.2} fps; infer {:.1} ms/frame, render {:.1} ms/frame)",
+            output.unwrap().display(),
+            frames / elapsed,
+            inference_time.as_secs_f64() * 1_000.0 / frames,
+            render_time.as_secs_f64() * 1_000.0 / frames,
+        );
+    } else {
+        println!(
+            "Processed {frame_number} video frames in {elapsed:.1}s ({:.2} fps; infer {:.1} ms/frame)",
+            frames / elapsed,
+            inference_time.as_secs_f64() * 1_000.0 / frames,
+        );
+    }
     println!(
-        "Wrote {frame_number} annotated frames to {} in {elapsed:.1}s ({:.2} fps; infer {:.1} ms/frame, render {:.1} ms/frame)",
-        output.display(),
-        frames / elapsed,
-        inference_time.as_secs_f64() * 1_000.0 / frames,
-        render_time.as_secs_f64() * 1_000.0 / frames,
+        "Rust Inference Breakdown:\n\
+         - Preprocess (CPU Resize + Normalization): {:.2} ms/frame\n\
+         - TensorRT Engine Inference: {:.2} ms/frame\n\
+         - Postprocess (Decode Pose): {:.2} ms/frame",
+        inferencer.preprocess_accum.as_secs_f64() * 1_000.0 / frames,
+        inferencer.engine_accum.as_secs_f64() * 1_000.0 / frames,
+        inferencer.postprocess_accum.as_secs_f64() * 1_000.0 / frames
     );
     Ok(())
 }

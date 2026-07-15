@@ -8,6 +8,9 @@ pub struct PoseInferencer {
     imgsz: u32,
     conf: f32,
     kpt_conf: f32,
+    pub preprocess_accum: std::time::Duration,
+    pub engine_accum: std::time::Duration,
+    pub postprocess_accum: std::time::Duration,
 }
 
 impl PoseInferencer {
@@ -25,39 +28,59 @@ impl PoseInferencer {
             imgsz,
             conf,
             kpt_conf,
+            preprocess_accum: std::time::Duration::ZERO,
+            engine_accum: std::time::Duration::ZERO,
+            postprocess_accum: std::time::Duration::ZERO,
         })
     }
 
     pub fn infer(&mut self, image: &DynamicImage) -> Result<Vec<PoseDetection>> {
+        let t0 = std::time::Instant::now();
         let (blob, letterbox) = preprocess::letterbox_to_tensor(image, self.imgsz);
-        self.run(blob, letterbox)
+        self.preprocess_accum += t0.elapsed();
+
+        let t1 = std::time::Instant::now();
+        let data = self.engine.infer(&blob)?;
+        self.engine_accum += t1.elapsed();
+
+        let t2 = std::time::Instant::now();
+        let detections = postprocess::decode_pose(
+            &data,
+            &[1, 300, 57],
+            &letterbox,
+            self.conf,
+            self.kpt_conf,
+        );
+        self.postprocess_accum += t2.elapsed();
+
+        Ok(detections)
     }
 
     pub fn infer_rgba(
         &mut self,
-        rgba: &[u8],
+        rgba: &mut [u8],
         width: u32,
         height: u32,
     ) -> Result<Vec<PoseDetection>> {
+        let t0 = std::time::Instant::now();
         let (blob, letterbox) =
             preprocess::letterbox_rgba_to_tensor(rgba, width, height, self.imgsz);
-        self.run(blob, letterbox)
-    }
+        self.preprocess_accum += t0.elapsed();
 
-    fn run(
-        &mut self,
-        blob: Vec<f32>,
-        letterbox: preprocess::LetterboxInfo,
-    ) -> Result<Vec<PoseDetection>> {
+        let t1 = std::time::Instant::now();
         let data = self.engine.infer(&blob)?;
-        let shape = [1, 300, 57];
+        self.engine_accum += t1.elapsed();
 
-        Ok(postprocess::decode_pose(
+        let t2 = std::time::Instant::now();
+        let detections = postprocess::decode_pose(
             &data,
-            &shape,
+            &[1, 300, 57],
             &letterbox,
             self.conf,
             self.kpt_conf,
-        ))
+        );
+        self.postprocess_accum += t2.elapsed();
+
+        Ok(detections)
     }
 }

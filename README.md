@@ -116,17 +116,17 @@ Generated media, engines, and build artifacts are ignored by Git.
 
 ## CLI Reference
 
-| Option | Default | Description |
-| --- | --- | --- |
-| `--model PATH` | Required | FP16 YOLO26 pose ONNX model. |
-| `--source PATH` | Required | Input `.jpg`, `.jpeg`, `.png`, or `.mp4` file. `--image` is an alias. |
-| `--output PATH` | Required | Annotated output. Image inputs require `.jpg`, `.jpeg`, or `.png`; MP4 inputs require `.mp4`. |
-| `--device N` | `0` | CUDA device selected while building the TensorRT engine. |
-| `--cache PATH` | `./trt_cache` | TensorRT engine cache directory. |
-| `--conf FLOAT` | `0.25` | Minimum detection confidence. |
-| `--kpt-conf FLOAT` | `0.5` | Minimum keypoint visibility for console output and rig rendering. |
-| `--imgsz N` | `640` | Square model input size. This must match the static TensorRT engine input shape. |
-| `--fp16` | `false` | Compatibility flag. Direct TensorRT uses the precision encoded in the ONNX model; use an FP16 ONNX model for FP16 inference. |
+| Option             | Default       | Description                                                                                                                  |
+| ------------------ | ------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| `--model PATH`     | Required      | FP16 YOLO26 pose ONNX model.                                                                                                 |
+| `--source PATH`    | Required      | Input `.jpg`, `.jpeg`, `.png`, or `.mp4` file. `--image` is an alias.                                                        |
+| `--output PATH`    | Required      | Annotated output. Image inputs require `.jpg`, `.jpeg`, or `.png`; MP4 inputs require `.mp4`.                                |
+| `--device N`       | `0`           | CUDA device selected while building the TensorRT engine.                                                                     |
+| `--cache PATH`     | `./trt_cache` | TensorRT engine cache directory.                                                                                             |
+| `--conf FLOAT`     | `0.25`        | Minimum detection confidence.                                                                                                |
+| `--kpt-conf FLOAT` | `0.5`         | Minimum keypoint visibility for console output and rig rendering.                                                            |
+| `--imgsz N`        | `640`         | Square model input size. This must match the static TensorRT engine input shape.                                             |
+| `--fp16`           | `false`       | Compatibility flag. Direct TensorRT uses the precision encoded in the ONNX model; use an FP16 ONNX model for FP16 inference. |
 
 ## Architecture
 
@@ -158,3 +158,34 @@ JPEG / PNG or FFmpeg + NVENC MP4
   fallback implementation instead.
 - The engine cache is intentionally excluded from version control.
 - `test_video.sh` reports end-to-end, inference, and GPU rendering timing.
+
+## Video Benchmarks
+
+Below are comparative benchmark results on the same test input (via `test_video.sh` / `test_python.sh` running 575 frames):
+
+### Rust Results (Optimized)
+
+- **Video Annotation & Output Mode**:
+
+  ```text
+  ./test_video.sh  24.46s user 6.48s system 262% cpu 11.802 total
+  ```
+
+- **Pure Estimation Mode (omitting `--output`):**
+  ```text
+  Processed 575 video frames in 6.7s (85.57 fps; infer 9.3 ms/frame)
+  ```
+  _(Bypasses GPU overlays, GPU-to-CPU readbacks, and FFmpeg raw video pipes)_
+
+### Python Pose2Sim Results
+
+```text
+./cadencecam estimate   82.14s user 5.39s system 489% cpu 17.871 total
+```
+
+### Python Ultralytics Results
+
+```text
+Ultra2Sim pose estimation completed in (6.90) seconds
+./cadencecam estimate   47.73s user 3.43s system 607% cpu 8.415 total
+```
