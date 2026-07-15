@@ -11,11 +11,23 @@ struct Vertex {
     color: [f32; 4],
 }
 
+struct FrameResources {
+    width: u32,
+    height: u32,
+    source: wgpu::Texture,
+    target: wgpu::Texture,
+    target_view: wgpu::TextureView,
+    bind_group: wgpu::BindGroup,
+    readback: wgpu::Buffer,
+    padded_bytes_per_row: u32,
+}
+
 pub struct PoseRenderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
     pipeline: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
+    frame_resources: Option<FrameResources>,
 }
 
 impl PoseRenderer {
@@ -101,23 +113,17 @@ impl PoseRenderer {
             queue,
             pipeline,
             bind_group_layout,
+            frame_resources: None,
         })
     }
 
-    pub fn render(
-        &self,
-        rgba: &[u8],
-        width: u32,
-        height: u32,
-        detections: &[PoseDetection],
-        kpt_conf: f32,
-    ) -> Result<Vec<u8>> {
-        if rgba.len() != width as usize * height as usize * 4 {
-            bail!(
-                "RGBA frame has {} bytes; expected {}",
-                rgba.len(),
-                width as usize * height as usize * 4
-            );
+    fn ensure_frame_resources(&mut self, width: u32, height: u32) {
+        if self
+            .frame_resources
+            .as_ref()
+            .is_some_and(|r| r.width == width && r.height == height)
+        {
+            return;
         }
         let extent = wgpu::Extent3d {
             width,
@@ -134,9 +140,83 @@ impl PoseRenderer {
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
+        let target = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("annotated frame"),
+            size: extent,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let source_view = source.create_view(&Default::default());
+        let target_view = target.create_view(&Default::default());
+        let sampler = self.device.create_sampler(&wgpu::SamplerDescriptor {
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("source frame bind group"),
+            layout: &self.bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&source_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+            ],
+        });
+        let padded_bytes_per_row = (width * 4).div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
+            * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let readback = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("pose readback"),
+            size: (padded_bytes_per_row * height) as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        self.frame_resources = Some(FrameResources {
+            width,
+            height,
+            source,
+            target,
+            target_view,
+            bind_group,
+            readback,
+            padded_bytes_per_row,
+        });
+    }
+
+    fn render_inner(
+        &mut self,
+        rgba: &[u8],
+        width: u32,
+        height: u32,
+        detections: &[PoseDetection],
+        kpt_conf: f32,
+        output: &mut Vec<u8>,
+    ) -> Result<()> {
+        if rgba.len() != width as usize * height as usize * 4 {
+            bail!(
+                "RGBA frame has {} bytes; expected {}",
+                rgba.len(),
+                width as usize * height as usize * 4
+            );
+        }
+        let extent = wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        };
+        self.ensure_frame_resources(width, height);
+        let resources = self.frame_resources.as_ref().unwrap();
         self.queue.write_texture(
             wgpu::TexelCopyTextureInfo {
-                texture: &source,
+                texture: &resources.source,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
@@ -149,37 +229,6 @@ impl PoseRenderer {
             },
             extent,
         );
-        let target = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("annotated frame"),
-            size: extent,
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8UnormSrgb,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
-        });
-        let sampler = self.device.create_sampler(&wgpu::SamplerDescriptor {
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            ..Default::default()
-        });
-        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("source frame bind group"),
-            layout: &self.bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(
-                        &source.create_view(&Default::default()),
-                    ),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&sampler),
-                },
-            ],
-        });
         let vertices = vertices(detections, width as f32, height as f32, kpt_conf);
         let vertex_buffer = self
             .device
@@ -197,7 +246,7 @@ impl PoseRenderer {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("pose render pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &target.create_view(&Default::default()),
+                    view: &resources.target_view,
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
@@ -209,37 +258,29 @@ impl PoseRenderer {
                 occlusion_query_set: None,
             });
             pass.set_pipeline(&self.pipeline);
-            pass.set_bind_group(0, &bind_group, &[]);
+            pass.set_bind_group(0, &resources.bind_group, &[]);
             pass.set_vertex_buffer(0, vertex_buffer.slice(..));
             pass.draw(0..vertices.len() as u32, 0..1);
         }
-        let padded_bytes_per_row = (width * 4).div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
-            * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
-        let readback = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("pose readback"),
-            size: (padded_bytes_per_row * height) as u64,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
-                texture: &target,
+                texture: &resources.target,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
             wgpu::TexelCopyBufferInfo {
-                buffer: &readback,
+                buffer: &resources.readback,
                 layout: wgpu::TexelCopyBufferLayout {
                     offset: 0,
-                    bytes_per_row: Some(padded_bytes_per_row),
+                    bytes_per_row: Some(resources.padded_bytes_per_row),
                     rows_per_image: Some(height),
                 },
             },
             extent,
         );
         self.queue.submit(Some(encoder.finish()));
-        let slice = readback.slice(..);
+        let slice = resources.readback.slice(..);
         let (sender, receiver) = std::sync::mpsc::channel();
         slice.map_async(wgpu::MapMode::Read, move |result| {
             let _ = sender.send(result);
@@ -249,15 +290,40 @@ impl PoseRenderer {
             .recv()
             .map_err(|_| anyhow::anyhow!("GPU readback callback dropped"))??;
         let mapped = slice.get_mapped_range();
-        let mut output = vec![0; (width * height * 4) as usize];
+        output.resize((width * height * 4) as usize, 0);
         for y in 0..height as usize {
-            let src = &mapped[y * padded_bytes_per_row as usize
-                ..y * padded_bytes_per_row as usize + width as usize * 4];
+            let src = &mapped[y * resources.padded_bytes_per_row as usize
+                ..y * resources.padded_bytes_per_row as usize + width as usize * 4];
             output[y * width as usize * 4..(y + 1) * width as usize * 4].copy_from_slice(src);
         }
         drop(mapped);
-        readback.unmap();
+        resources.readback.unmap();
+        Ok(())
+    }
+
+    pub fn render(
+        &mut self,
+        rgba: &[u8],
+        width: u32,
+        height: u32,
+        detections: &[PoseDetection],
+        kpt_conf: f32,
+    ) -> Result<Vec<u8>> {
+        let mut output = Vec::new();
+        self.render_inner(rgba, width, height, detections, kpt_conf, &mut output)?;
         Ok(output)
+    }
+
+    pub fn render_into(
+        &mut self,
+        rgba: &[u8],
+        width: u32,
+        height: u32,
+        detections: &[PoseDetection],
+        kpt_conf: f32,
+        output: &mut Vec<u8>,
+    ) -> Result<()> {
+        self.render_inner(rgba, width, height, detections, kpt_conf, output)
     }
 }
 

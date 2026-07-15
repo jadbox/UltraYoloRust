@@ -4,8 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-# ORT 2.x is presently published as release candidates on crates.io.
-ort = { version = "2.0.0-rc.12", features = ["cuda", "tensorrt"] }
+# Direct TensorRT engine runtime. Engines are built with the installed trtexec.
+tensorrt-infer = "0.1"
 
 # Image loading / resizing (no OpenCV dependency)
 image  = "0.25"

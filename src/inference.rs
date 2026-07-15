@@ -1,11 +1,10 @@
 use anyhow::Result;
 use image::DynamicImage;
-use ort::{inputs, session::Session, value::Tensor};
 
-use crate::{mode, postprocess, preprocess, types::PoseDetection};
+use crate::{postprocess, preprocess, tensorrt::TensorRtEngine, types::PoseDetection};
 
 pub struct PoseInferencer {
-    session: Session,
+    engine: TensorRtEngine,
     imgsz: u32,
     conf: f32,
     kpt_conf: f32,
@@ -15,14 +14,14 @@ impl PoseInferencer {
     pub fn new(
         model: &std::path::Path,
         device: i32,
-        fp16: bool,
+        _fp16: bool,
         cache: &std::path::Path,
         imgsz: u32,
         conf: f32,
         kpt_conf: f32,
     ) -> Result<Self> {
         Ok(Self {
-            session: mode::build_session(model, device, fp16, cache)?,
+            engine: TensorRtEngine::new(model, cache, device)?,
             imgsz,
             conf,
             kpt_conf,
@@ -31,14 +30,31 @@ impl PoseInferencer {
 
     pub fn infer(&mut self, image: &DynamicImage) -> Result<Vec<PoseDetection>> {
         let (blob, letterbox) = preprocess::letterbox_to_tensor(image, self.imgsz);
-        let input = Tensor::from_array(([1i64, 3, self.imgsz as i64, self.imgsz as i64], blob))
-            .map_err(|err| anyhow::anyhow!(err.to_string()))?;
-        let outputs = self.session.run(inputs!["images" => input])?;
-        let (shape, data) = outputs["output0"].try_extract_tensor::<f32>()?;
+        self.run(blob, letterbox)
+    }
+
+    pub fn infer_rgba(
+        &mut self,
+        rgba: &[u8],
+        width: u32,
+        height: u32,
+    ) -> Result<Vec<PoseDetection>> {
+        let (blob, letterbox) =
+            preprocess::letterbox_rgba_to_tensor(rgba, width, height, self.imgsz);
+        self.run(blob, letterbox)
+    }
+
+    fn run(
+        &mut self,
+        blob: Vec<f32>,
+        letterbox: preprocess::LetterboxInfo,
+    ) -> Result<Vec<PoseDetection>> {
+        let data = self.engine.infer(&blob)?;
+        let shape = [1, 300, 57];
 
         Ok(postprocess::decode_pose(
-            data,
-            &shape.to_vec(),
+            &data,
+            &shape,
             &letterbox,
             self.conf,
             self.kpt_conf,

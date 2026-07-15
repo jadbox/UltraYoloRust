@@ -76,3 +76,44 @@ pub fn letterbox_to_tensor(img: &DynamicImage, model_size: u32) -> (Vec<f32>, Le
 
     (blob, info)
 }
+
+/// Convert a borrowed RGBA frame without cloning its full-resolution buffer.
+pub fn letterbox_rgba_to_tensor(
+    rgba: &[u8],
+    src_w: u32,
+    src_h: u32,
+    model_size: u32,
+) -> (Vec<f32>, LetterboxInfo) {
+    let frame = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(src_w, src_h, rgba)
+        .expect("caller must provide exactly width * height * 4 RGBA bytes");
+    let scale = f32::min(
+        model_size as f32 / src_w as f32,
+        model_size as f32 / src_h as f32,
+    );
+    let new_w = (src_w as f32 * scale).round() as u32;
+    let new_h = (src_h as f32 * scale).round() as u32;
+    let resized = image::imageops::resize(&frame, new_w, new_h, FilterType::Triangle);
+    let pad_left = (((model_size - new_w) as f32 / 2.0) - 0.1).round() as u32;
+    let pad_top = (((model_size - new_h) as f32 / 2.0) - 0.1).round() as u32;
+    let area = (model_size * model_size) as usize;
+    let mut blob = vec![114.0 / 255.0; 3 * area];
+    for y in 0..new_h as usize {
+        for x in 0..new_w as usize {
+            let pixel = resized.get_pixel(x as u32, y as u32);
+            let index = (y + pad_top as usize) * model_size as usize + x + pad_left as usize;
+            blob[index] = pixel[0] as f32 / 255.0;
+            blob[area + index] = pixel[1] as f32 / 255.0;
+            blob[2 * area + index] = pixel[2] as f32 / 255.0;
+        }
+    }
+    (
+        blob,
+        LetterboxInfo {
+            scale,
+            pad_left,
+            pad_top,
+            orig_w: src_w,
+            orig_h: src_h,
+        },
+    )
+}

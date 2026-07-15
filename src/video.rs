@@ -5,10 +5,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::{bail, Context, Result};
-use image::{DynamicImage, RgbaImage};
-
 use crate::{inference::PoseInferencer, render::PoseRenderer};
+use anyhow::{bail, Context, Result};
 
 struct VideoInfo {
     width: u32,
@@ -20,7 +18,7 @@ pub fn annotate_mp4(
     source: &Path,
     output: &Path,
     inferencer: &mut PoseInferencer,
-    renderer: &PoseRenderer,
+    renderer: &mut PoseRenderer,
     kpt_conf: f32,
 ) -> Result<()> {
     let info = probe(source)?;
@@ -82,6 +80,7 @@ pub fn annotate_mp4(
     let started = Instant::now();
     let mut inference_time = Duration::ZERO;
     let mut render_time = Duration::ZERO;
+    let mut annotated = Vec::with_capacity(frame_bytes);
     loop {
         let mut read = 0;
         while read < frame.len() {
@@ -100,13 +99,18 @@ pub fn annotate_mp4(
             break;
         }
 
-        let image = RgbaImage::from_raw(info.width, info.height, frame.clone())
-            .context("decoded frame dimensions do not match its buffer")?;
         let inference_started = Instant::now();
-        let detections = inferencer.infer(&DynamicImage::ImageRgba8(image))?;
+        let detections = inferencer.infer_rgba(&frame, info.width, info.height)?;
         inference_time += inference_started.elapsed();
         let render_started = Instant::now();
-        let annotated = renderer.render(&frame, info.width, info.height, &detections, kpt_conf)?;
+        renderer.render_into(
+            &frame,
+            info.width,
+            info.height,
+            &detections,
+            kpt_conf,
+            &mut annotated,
+        )?;
         render_time += render_started.elapsed();
         writer
             .write_all(&annotated)

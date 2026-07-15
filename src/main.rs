@@ -1,8 +1,8 @@
 mod inference;
-mod mode;
 mod postprocess;
 mod preprocess;
 mod render;
+mod tensorrt;
 mod types;
 mod video;
 
@@ -50,7 +50,7 @@ fn main() -> Result<()> {
         args.conf,
         args.kpt_conf,
     )?;
-    let renderer = PoseRenderer::new()?;
+    let mut renderer = PoseRenderer::new()?;
     match extension(&args.source).as_deref() {
         Some("mp4") => {
             if extension(&args.output).as_deref() != Some("mp4") {
@@ -60,12 +60,12 @@ fn main() -> Result<()> {
                 &args.source,
                 &args.output,
                 &mut inferencer,
-                &renderer,
+                &mut renderer,
                 args.kpt_conf,
             )
         }
         Some("jpg") | Some("jpeg") | Some("png") => {
-            annotate_image(&args, &mut inferencer, &renderer)
+            annotate_image(&args, &mut inferencer, &mut renderer)
         }
         _ => bail!(
             "unsupported source {}; expected JPEG, PNG, or MP4",
@@ -77,7 +77,7 @@ fn main() -> Result<()> {
 fn annotate_image(
     args: &Cli,
     inferencer: &mut PoseInferencer,
-    renderer: &PoseRenderer,
+    renderer: &mut PoseRenderer,
 ) -> Result<()> {
     match extension(&args.output).as_deref() {
         Some("jpg") | Some("jpeg") | Some("png") => {}
