@@ -71,3 +71,52 @@ pub const COCO_SKELETON: [(usize, usize); 19] = [
     (3, 5),
     (4, 6),
 ];
+
+#[derive(serde::Serialize)]
+pub struct OpenSimDoc {
+    pub version: f64,
+    pub people: Vec<OpenSimPerson>,
+}
+
+#[derive(serde::Serialize)]
+pub struct OpenSimPerson {
+    pub person_id: Vec<i32>,
+    pub pose_keypoints_2d: Vec<f32>,
+    pub face_keypoints_2d: Vec<f32>,
+    pub hand_left_keypoints_2d: Vec<f32>,
+    pub hand_right_keypoints_2d: Vec<f32>,
+    pub pose_keypoints_3d: Vec<f32>,
+    pub face_keypoints_3d: Vec<f32>,
+    pub hand_left_keypoints_3d: Vec<f32>,
+    pub hand_right_keypoints_3d: Vec<f32>,
+}
+
+pub fn coco17_to_halpe26(keypoints: &[Keypoint; 17]) -> Vec<f32> {
+    let mut out = vec![0.0; 26 * 3];
+    for (i, kp) in keypoints.iter().enumerate() {
+        out[i * 3] = kp.x;
+        out[i * 3 + 1] = kp.y;
+        out[i * 3 + 2] = kp.conf;
+    }
+    out
+}
+
+pub fn select_best_person(detections: &[PoseDetection]) -> Option<&PoseDetection> {
+    let mut best_det: Option<&PoseDetection> = None;
+    let mut best_score = -1.0;
+    for det in detections {
+        let score: f32 = det.keypoints.iter()
+            .map(|kp| if !kp.conf.is_nan() && kp.conf > 0.0 { kp.conf } else { 0.0 })
+            .sum();
+        if score > best_score {
+            best_score = score;
+            best_det = Some(det);
+        }
+    }
+    if best_score <= 0.0 {
+        None
+    } else {
+        best_det
+    }
+}
+

@@ -11,7 +11,11 @@ use clap::Parser;
 use image::{open as open_image, DynamicImage, RgbaImage};
 use std::path::PathBuf;
 
-use crate::{inference::PoseInferencer, render::PoseRenderer, types::COCO_KPT_NAMES};
+use crate::{
+    inference::PoseInferencer,
+    render::PoseRenderer,
+    types::{coco17_to_halpe26, select_best_person, COCO_KPT_NAMES, OpenSimDoc, OpenSimPerson},
+};
 
 #[derive(Parser)]
 #[command(name = "yolo26-pose", about = "YOLO26 pose inference via ORT/TensorRT")]
@@ -36,7 +40,11 @@ struct Cli {
     kpt_conf: f32,
     #[arg(long, default_value_t = 640)]
     imgsz: u32,
+    /// Output directory for OpenSim format JSON collections.
+    #[arg(long)]
+    opensim: Option<PathBuf>,
 }
+
 
 fn main() -> Result<()> {
     let args = Cli::parse();
@@ -62,6 +70,7 @@ fn main() -> Result<()> {
                 &mut inferencer,
                 &mut renderer,
                 args.kpt_conf,
+                args.opensim.as_deref(),
             )
         }
         Some("jpg") | Some("jpeg") | Some("png") => {
@@ -87,6 +96,40 @@ fn annotate_image(
     println!("Image: {}x{}", image.width(), image.height());
     let detections = inferencer.infer(&image)?;
     print_detections(&detections, args.kpt_conf);
+
+    if let Some(ref dir) = args.opensim {
+        std::fs::create_dir_all(dir)?;
+        let stem = args.source.file_stem().and_then(|s| s.to_str()).unwrap_or("image").to_string();
+        let filename = format!("{}_000000.json", stem);
+        let path = dir.join(filename);
+        let best = select_best_person(&detections).cloned();
+        let handle = std::thread::spawn(move || -> Result<()> {
+            let people = if let Some(det) = best {
+                vec![OpenSimPerson {
+                    person_id: vec![-1],
+                    pose_keypoints_2d: coco17_to_halpe26(&det.keypoints),
+                    face_keypoints_2d: vec![],
+                    hand_left_keypoints_2d: vec![],
+                    hand_right_keypoints_2d: vec![],
+                    pose_keypoints_3d: vec![],
+                    face_keypoints_3d: vec![],
+                    hand_left_keypoints_3d: vec![],
+                    hand_right_keypoints_3d: vec![],
+                }]
+            } else {
+                vec![]
+            };
+            let doc = OpenSimDoc {
+                version: 1.3,
+                people,
+            };
+            let file = std::fs::File::create(&path).context("creating opensim json file")?;
+            serde_json::to_writer(file, &doc).context("writing opensim json")?;
+            Ok(())
+        });
+        handle.join().unwrap()?;
+    }
+
     let rgba = image.to_rgba8();
     let annotated = renderer.render(
         rgba.as_raw(),
@@ -107,6 +150,7 @@ fn annotate_image(
     println!("Wrote annotated image to {}", args.output.display());
     Ok(())
 }
+
 
 fn print_detections(detections: &[types::PoseDetection], kpt_conf: f32) {
     println!("Detected {} person(s):", detections.len());

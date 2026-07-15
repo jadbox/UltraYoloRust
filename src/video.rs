@@ -1,12 +1,21 @@
 use std::{
     io::{BufReader, Read, Write},
-    path::Path,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
     time::{Duration, Instant},
 };
 
-use crate::{inference::PoseInferencer, render::PoseRenderer};
+use crate::{
+    inference::PoseInferencer,
+    render::PoseRenderer,
+    types::{coco17_to_halpe26, select_best_person, OpenSimDoc, OpenSimPerson},
+};
 use anyhow::{bail, Context, Result};
+
+struct SavePayload {
+    path: PathBuf,
+    doc: OpenSimDoc,
+}
 
 struct VideoInfo {
     width: u32,
@@ -20,6 +29,7 @@ pub fn annotate_mp4(
     inferencer: &mut PoseInferencer,
     renderer: &mut PoseRenderer,
     kpt_conf: f32,
+    opensim: Option<&Path>,
 ) -> Result<()> {
     let info = probe(source)?;
     let frame_bytes = info.width as usize * info.height as usize * 4;
@@ -75,6 +85,22 @@ pub fn annotate_mp4(
         .stdin
         .take()
         .context("ffmpeg encoder has no stdin")?;
+    let stem = source.file_stem().and_then(|s| s.to_str()).unwrap_or("video").to_string();
+    if let Some(ref dir) = opensim {
+        std::fs::create_dir_all(dir)?;
+    }
+    let (tx, rx) = std::sync::mpsc::channel::<SavePayload>();
+    let writer_thread = std::thread::spawn(move || {
+        while let Ok(payload) = rx.recv() {
+            if let Err(e) = std::fs::File::create(&payload.path)
+                .context("creating opensim json file")
+                .and_then(|file| serde_json::to_writer(file, &payload.doc).context("writing opensim json"))
+            {
+                eprintln!("Error saving OpenSim JSON to {}: {:?}", payload.path.display(), e);
+            }
+        }
+    });
+
     let mut frame = vec![0; frame_bytes];
     let mut frame_number = 0usize;
     let started = Instant::now();
@@ -102,6 +128,33 @@ pub fn annotate_mp4(
         let inference_started = Instant::now();
         let detections = inferencer.infer_rgba(&frame, info.width, info.height)?;
         inference_time += inference_started.elapsed();
+
+        if let Some(ref dir) = opensim {
+            let filename = format!("{}_{:06}.json", stem, frame_number);
+            let path = dir.join(filename);
+            let best = select_best_person(&detections).cloned();
+            let people = if let Some(det) = best {
+                vec![OpenSimPerson {
+                    person_id: vec![-1],
+                    pose_keypoints_2d: coco17_to_halpe26(&det.keypoints),
+                    face_keypoints_2d: vec![],
+                    hand_left_keypoints_2d: vec![],
+                    hand_right_keypoints_2d: vec![],
+                    pose_keypoints_3d: vec![],
+                    face_keypoints_3d: vec![],
+                    hand_left_keypoints_3d: vec![],
+                    hand_right_keypoints_3d: vec![],
+                }]
+            } else {
+                vec![]
+            };
+            let doc = OpenSimDoc {
+                version: 1.3,
+                people,
+            };
+            let _ = tx.send(SavePayload { path, doc });
+        }
+
         let render_started = Instant::now();
         renderer.render_into(
             &frame,
@@ -128,6 +181,8 @@ pub fn annotate_mp4(
         }
     }
     drop(writer);
+    drop(tx);
+    let _ = writer_thread.join();
     if !decoder.wait()?.success() {
         bail!("ffmpeg video decoder failed");
     }

@@ -2,3 +2,5 @@ trt_cache/
 target/
 annotated.*
 *.mp4
+pose/
+

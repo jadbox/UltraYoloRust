@@ -3,4 +3,5 @@ cargo run --release -- \
   --source image.jpg \
   --output annotated.jpg \
   --fp16 \
-  --cache ./trt_cache
+  --cache ./trt_cache \
+  --opensim ./pose/img
