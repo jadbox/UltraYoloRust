@@ -10,12 +10,6 @@ into a cached engine under `trt_cache/`. Engines are specific to TensorRT,
 CUDA, GPU architecture, and model contents; delete the cache after upgrading
 any of those components.
 
-Direct engine validation is available with:
-
-```bash
-./test_tensorrt11.sh
-```
-
 ## Test
 
 Run the full Rust video pipeline with:
@@ -24,4 +18,5 @@ Run the full Rust video pipeline with:
 ./test_video.sh
 ```
 
-It executes TensorRT inference, GPU pose rendering, and NVENC video encoding.
+It builds or loads the TensorRT engine, then executes TensorRT inference, GPU
+pose rendering, and NVENC video encoding.

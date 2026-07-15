@@ -108,9 +108,8 @@ Processed 300 video frames in 8.6s (34.71 fps): infer 18.8 ms/frame, render 3.4 
 ### Included Tests
 
 ```bash
-./test.sh             # Annotates image.jpg as annotated.jpg
-./test_video.sh       # Annotates the configured MP4 fixture as annotated.mp4
-./test_tensorrt11.sh  # Builds/benchmarks only the TensorRT engine
+./test.sh       # Builds/loads the engine and annotates image.jpg as annotated.jpg
+./test_video.sh # Builds/loads the engine and annotates the configured MP4 fixture
 ```
 
 Generated media, engines, and build artifacts are ignored by Git.
@@ -158,5 +157,4 @@ JPEG / PNG or FFmpeg + NVENC MP4
   GTX 1080 Ti (compute capability 6.1), use a separate CUDA-ONNX Runtime
   fallback implementation instead.
 - The engine cache is intentionally excluded from version control.
-- The engine benchmark excludes preprocessing, host/device transfers, video
-  decode, rendering, and encoding. Use `test_video.sh` for end-to-end timing.
+- `test_video.sh` reports end-to-end, inference, and GPU rendering timing.
